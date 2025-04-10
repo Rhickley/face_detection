@@ -22,6 +22,7 @@ class ModelConfig {
   final bool isColor;
   final List<String> labels;
   final Map<String, String> labelTranslations;
+  double fps;
 
   ModelConfig({
     required this.path,
@@ -29,55 +30,25 @@ class ModelConfig {
     required this.isColor,
     required this.labels,
     required this.labelTranslations,
+    this.fps = 0,
   });
 }
 
-final Map<String, ModelConfig> modelConfigs = {
-  'Modelo 1': ModelConfig(
-    path: 'assets/modelo_convertido.tflite',
-    inputSize: 48,
-    isColor: false,
-    labels: ['Angry', 'Disgust', 'Fear', 'Happy', 'Neutral', 'Sad', 'Surprise'],
-    labelTranslations: {
-      'Angry': 'Raiva',
-      'Disgust': 'Desgosto',
-      'Fear': 'Medo',
-      'Happy': 'Feliz',
-      'Neutral': 'Neutro',
-      'Sad': 'Triste',
-      'Surprise': 'Surpresa'
-    },
-  ),
-  'Modelo 2': ModelConfig(
-    path: 'assets/model.tflite',
-    inputSize: 224,
-    isColor: true,
-    labels: ['Angry', 'Fear', 'Happy', 'Neutral', 'Sad', 'Surprised'],
-    labelTranslations: {
-      'Angry': 'Raiva',
-      'Fear': 'Medo',
-      'Happy': 'Feliz',
-      'Neutral': 'Neutro',
-      'Sad': 'Triste',
-      'Surprised': 'Surpresa'
-    },
-  ),
-  'Modelo 3': ModelConfig(
-    path: 'assets/fe93.tflite',
-    inputSize: 224,
-    isColor: true,
-    labels: ['驚喜', '害怕', '噁心', '開心', '傷心', '生氣', '無'],
-    labelTranslations: {
-      '驚喜': 'Surpresa',
-      '害怕': 'Medo',
-      '噁心': 'Nojo',
-      '開心': 'Feliz',
-      '傷心': 'Triste',
-      '生氣': 'Raiva',
-      '無': 'Neutro'
-    },
-  ),
-};
+final ModelConfig modelConfig = ModelConfig(
+  path: 'assets/modelo_convertido.tflite',
+  inputSize: 48,
+  isColor: false,
+  labels: ['Angry', 'Disgust', 'Fear', 'Happy', 'Neutral', 'Sad', 'Surprise'],
+  labelTranslations: {
+    'Angry': 'Raiva',
+    'Disgust': 'Desgosto',
+    'Fear': 'Medo',
+    'Happy': 'Feliz',
+    'Neutral': 'Neutro',
+    'Sad': 'Triste',
+    'Surprise': 'Surpresa'
+  },
+);
 
 class FaceRegion {
   final Rect rect;
@@ -126,9 +97,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   bool faceDetected = false;
   bool isProcessing = false;
   String detectedEmotion = "Procurando...";
-  bool isFrontCamera = true;
   FaceRegion? currentFaceRegion;
-  String selectedModel = 'Modelo 1';
 
   ReceivePort? _receivePort;
   Isolate? _isolate;
@@ -144,6 +113,11 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
 
   bool _saveDebugImages = false;
 
+  int _frameCount = 0;
+  DateTime _fpsStartTime = DateTime.now();
+  double _currentFps = 0;
+  int _processingInterval = 1;
+
   @override
   void initState() {
     super.initState();
@@ -151,13 +125,25 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _currentOrientation = _calculateCurrentOrientation();
     _initIsolate();
-    _loadModel().then((_) => _initializeCamera(1));
+    _loadModel().then((_) => _initializeCamera());
+
+    Timer.periodic(const Duration(seconds: 1), (timer) {
+      final now = DateTime.now();
+      final elapsed = now.difference(_fpsStartTime).inSeconds;
+      if (elapsed >= 1) {
+        setState(() {
+          _currentFps = _frameCount / elapsed;
+          modelConfig.fps = _currentFps;
+          _frameCount = 0;
+          _fpsStartTime = now;
+        });
+      }
+    });
   }
 
   Future<void> _loadModel() async {
     try {
-      debugPrint("⬇️ Iniciando carregamento do modelo $selectedModel...");
-      final modelConfig = modelConfigs[selectedModel]!;
+      debugPrint("⬇️ Iniciando carregamento do modelo...");
       final options = InterpreterOptions();
 
       try {
@@ -166,13 +152,25 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
           options.addDelegate(XNNPackDelegate());
           debugPrint("✅ XNNPACK delegate habilitado com sucesso");
         }
+
+        if (Platform.isAndroid) {
+          try {
+            debugPrint("⚡ Tentando habilitar GPU delegate...");
+            options.addDelegate(GpuDelegateV2());
+            debugPrint("✅ GPU delegate habilitado com sucesso");
+          } catch (e) {
+            debugPrint("⚠️ Falha ao habilitar GPU delegate: $e");
+          }
+        }
       } catch (e) {
-        debugPrint("⚠️ Falha ao habilitar XNNPACK: $e");
+        debugPrint("⚠️ Falha ao habilitar delegates: $e");
       }
 
       debugPrint("📦 Carregando modelo TFLite...");
       _interpreter = await Interpreter.fromAsset(modelConfig.path, options: options);
       debugPrint("✅ Modelo carregado com sucesso");
+
+      _interpreter.allocateTensors();
 
       debugPrint("📊 Obtendo tensores de entrada/saída...");
       final inputTensors = _interpreter.getInputTensors();
@@ -210,30 +208,6 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _changeModel(String newModel) async {
-    if (selectedModel == newModel) return;
-
-    debugPrint("🔄 Alterando modelo de $selectedModel para $newModel...");
-    setState(() {
-      selectedModel = newModel;
-      detectedEmotion = "Carregando...";
-    });
-
-    _interpreter.close();
-
-    await _loadModel();
-
-    setState(() {
-      detectedEmotion = "Procurando...";
-    });
-  }
-
-  Future<void> _toggleCamera() async {
-    debugPrint("🔄 Alternando câmera...");
-    isFrontCamera = !isFrontCamera;
-    await _initializeCamera(isFrontCamera ? 1 : 0);
-  }
-
   Orientation _calculateCurrentOrientation() {
     final orientation = WidgetsBinding.instance.window.physicalSize.aspectRatio > 1
         ? Orientation.landscape
@@ -252,23 +226,37 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     });
   }
 
-  Future<void> _initializeCamera(int cameraIndex) async {
+  Future<void> _initializeCamera() async {
     try {
-      debugPrint("📷 Inicializando câmera $cameraIndex...");
+      debugPrint("📷 Inicializando câmera frontal...");
       if (controller != null) {
         debugPrint("♻️ Liberando câmera anterior...");
         await controller!.dispose();
       }
 
-      controller = CameraController(_cameras[cameraIndex], ResolutionPreset.high);
+      // Encontra a câmera frontal
+      final frontCamera = _cameras.firstWhere(
+            (camera) => camera.lensDirection == CameraLensDirection.front,
+        orElse: () => _cameras.first,
+      );
+
+      controller = CameraController(
+        frontCamera,
+        ResolutionPreset.high,
+        imageFormatGroup: ImageFormatGroup.yuv420,
+      );
+
       debugPrint("⚙️ Configurando câmera...");
       await controller!.initialize();
+
+      await controller!.lockCaptureOrientation(DeviceOrientation.portraitUp);
+      await controller!.setFlashMode(FlashMode.off);
 
       if (mounted) {
         debugPrint("🎥 Iniciando stream de imagens...");
         controller!.startImageStream(_processCameraImage);
         setState(() {});
-        debugPrint("✅ Câmera ${isFrontCamera ? "frontal" : "traseira"} inicializada com sucesso");
+        debugPrint("✅ Câmera frontal inicializada com sucesso");
       }
     } catch (e) {
       debugPrint("❌ Falha na inicialização da câmera: ${e.toString()}");
@@ -286,6 +274,8 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
         rootIsolateToken: RootIsolateToken.instance!,
       ),
       debugName: 'FaceDetectionIsolate',
+      onError: _receivePort!.sendPort,
+      onExit: _receivePort!.sendPort,
     );
 
     _receivePort!.listen((message) {
@@ -306,6 +296,8 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
           faceDetected = false;
           currentFaceRegion = null;
         });
+      } else if (message is List) {
+        debugPrint("❌ Erro no isolate: ${message[0]} - ${message[1]}");
       }
     });
   }
@@ -313,6 +305,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   static void _isolateEntry(_IsolateInitializationParams params) {
     debugPrint("🧵 Isolate de detecção iniciado");
     BackgroundIsolateBinaryMessenger.ensureInitialized(params.rootIsolateToken);
+
     final faceDetector = FaceDetector(
       options: FaceDetectorOptions(
         enableContours: false,
@@ -320,7 +313,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
         enableClassification: false,
         performanceMode: FaceDetectorMode.fast,
         enableTracking: true,
-        minFaceSize: 0.3,
+        minFaceSize: 0.25,
       ),
     );
 
@@ -421,8 +414,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
           : await getApplicationDocumentsDirectory();
 
       final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final modelName = selectedModel.replaceAll(' ', '_').toLowerCase();
-      final file = File('${directory.path}/debug_${modelName}_$timestamp.png');
+      final file = File('${directory.path}/debug_$timestamp.png');
 
       await file.writeAsBytes(img.encodePng(image));
       debugPrint('🖼️ Imagem salva em: ${file.path}');
@@ -432,8 +424,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   }
 
   Float32List _yuvToModelInput(CameraImage image, FaceRegion faceRegion) {
-    debugPrint("🔄 Preparando input para o modelo $selectedModel...");
-    final modelConfig = modelConfigs[selectedModel]!;
+    debugPrint("🔄 Preparando input para o modelo...");
     final channels = modelConfig.isColor ? 3 : 1;
     final inputBuffer = Float32List(1 * _inputSize * _inputSize * channels);
 
@@ -449,7 +440,6 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     final scaleY = faceRegion.rect.height / _inputSize;
 
     final bool needsRotation = _currentOrientation == Orientation.portrait;
-    final bool isFrontCameraRotated = isFrontCamera && needsRotation;
 
     int pixelIndex = 0;
     for (int y = 0; y < _inputSize; y++) {
@@ -466,42 +456,20 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
           origY = image.height - 1 - temp;
         }
 
-        if (isFrontCameraRotated) {
-          origX = image.width - 1 - origX;
-        }
+        // Para câmera frontal, invertemos horizontalmente
+        origX = image.width - 1 - origX;
 
         origX = origX.clamp(0, image.width - 1);
         origY = origY.clamp(0, image.height - 1);
 
         final yValue = yPlane[origY * yRowStride + origX] / 255.0;
 
-        if (modelConfig.isColor) {
-          final uvX = (origX / 2).floor();
-          final uvY = (origY / 2).floor();
-          final uvIndex = uvY * uvRowStride + uvX * uvPixelStride;
-
-          final uValue = uvPlane[uvIndex] / 255.0;
-          final vValue = uvPlane[uvIndex + 1] / 255.0;
-
-          final r = (yValue + 1.402 * (vValue - 0.5)).clamp(0.0, 1.0);
-          final g = (yValue - 0.344136 * (uValue - 0.5) - 0.714136 * (vValue - 0.5)).clamp(0.0, 1.0);
-          final b = (yValue + 1.772 * (uValue - 0.5)).clamp(0.0, 1.0);
-
-          inputBuffer[pixelIndex++] = r;
-          inputBuffer[pixelIndex++] = g;
-          inputBuffer[pixelIndex++] = b;
-
-          debugImage.setPixelRgb(x, y,
-              (r * 255).toInt(),
-              (g * 255).toInt(),
-              (b * 255).toInt());
-        } else {
-          inputBuffer[pixelIndex++] = yValue;
-          debugImage.setPixelRgb(x, y,
-              (yValue * 255).toInt(),
-              (yValue * 255).toInt(),
-              (yValue * 255).toInt());
-        }
+        // Modelo em tons de cinza
+        inputBuffer[pixelIndex++] = yValue;
+        debugImage.setPixelRgb(x, y,
+            (yValue * 255).toInt(),
+            (yValue * 255).toInt(),
+            (yValue * 255).toInt());
       }
     }
 
@@ -515,7 +483,13 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
 
   void _processCameraImage(CameraImage image) async {
     final now = DateTime.now();
-    if (lastProcessedTime != null && now.difference(lastProcessedTime!).inMilliseconds < 200) {
+
+    if (_frameCount % _processingInterval != 0) {
+      _frameCount++;
+      return;
+    }
+
+    if (lastProcessedTime != null && now.difference(lastProcessedTime!).inMilliseconds < 20) {
       debugPrint("⏭️ Pulando frame - processamento muito rápido");
       return;
     }
@@ -534,6 +508,8 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
 
     isProcessing = true;
     lastProcessedTime = now;
+    _frameCount++;
+
     debugPrint("\n🔄 Processando novo frame (${image.width}x${image.height})...");
 
     try {
@@ -570,11 +546,12 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
 
           try {
             debugPrint("⚡ Executando inferência do modelo...");
+            final stopwatch = Stopwatch()..start();
             _interpreter.run(input.reshape(_inputShape!), output);
+            debugPrint("⏱️ Tempo de inferência: ${stopwatch.elapsedMilliseconds}ms");
 
-            debugPrint("📊 Saídas do modelo: ${output[0]}");
+            debugPrint("📊 Saídas brutas do modelo: ${output[0]}");
 
-            final modelConfig = modelConfigs[selectedModel]!;
             final labels = modelConfig.labels;
             final labelTranslations = modelConfig.labelTranslations;
 
@@ -639,53 +616,46 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.title),
-        actions: [
-          PopupMenuButton<String>(
-            onSelected: _changeModel,
-            itemBuilder: (BuildContext context) {
-              return modelConfigs.keys.map((String model) {
-                return PopupMenuItem<String>(
-                  value: model,
-                  child: Text(model),
-                );
-              }).toList();
-            },
-            icon: const Icon(Icons.model_training),
-          ),
-        ],
       ),
       body: Stack(
         children: [
           if (controller != null && controller!.value.isInitialized)
             CameraPreview(controller!),
           if (currentFaceRegion != null) _buildFaceOverlay(),
+          Positioned(
+            top: 16,
+            right: 16,
+            child: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.5),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                'FPS: ${_currentFps.toStringAsFixed(1)}',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ),
         ],
       ),
-      floatingActionButton: Column(
-        mainAxisAlignment: MainAxisAlignment.end,
-        children: [
-          FloatingActionButton(
-            onPressed: _toggleCamera,
-            tooltip: 'Alternar câmera',
-            child: const Icon(Icons.switch_camera),
-          ),
-          SizedBox(height: 16),
-          FloatingActionButton(
-            onPressed: () {
-              setState(() {
-                _saveDebugImages = !_saveDebugImages;
-                debugPrint(_saveDebugImages
-                    ? "🖼️ Salvamento de imagens ativado"
-                    : "🖼️ Salvamento de imagens desativado");
-              });
-            },
-            tooltip: 'Debug de imagens',
-            child: Icon(_saveDebugImages
-                ? Icons.image
-                : Icons.image_not_supported),
-            heroTag: 'debugImages',
-          ),
-        ],
+      floatingActionButton: FloatingActionButton(
+        onPressed: () {
+          setState(() {
+            _saveDebugImages = !_saveDebugImages;
+            debugPrint(_saveDebugImages
+                ? "🖼️ Salvamento de imagens ativado"
+                : "🖼️ Salvamento de imagens desativado");
+          });
+        },
+        tooltip: 'Debug de imagens',
+        child: Icon(_saveDebugImages
+            ? Icons.image
+            : Icons.image_not_supported),
       ),
     );
   }
@@ -715,11 +685,10 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     double right = faceRect.right * scaleX;
     double bottom = faceRect.bottom * scaleY;
 
-    if (isFrontCamera) {
-      final tempLeft = left;
-      left = screenSize.width - right;
-      right = screenSize.width - tempLeft;
-    }
+    // Inverte horizontalmente para câmera frontal
+    final tempLeft = left;
+    left = screenSize.width - right;
+    right = screenSize.width - tempLeft;
 
     final shrinkFactor = 0.85;
     final centerX = (left + right) / 2;
@@ -760,7 +729,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
         ),
         child: Center(
           child: Padding(
-            padding: EdgeInsets.all(margin),
+            padding: const EdgeInsets.all(margin),
             child: Text(
               detectedEmotion,
               textAlign: TextAlign.center,
@@ -772,7 +741,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
                   Shadow(
                     color: Colors.black.withOpacity(0.7),
                     blurRadius: 3,
-                    offset: Offset(1, 1),
+                    offset: const Offset(1, 1),
                   ),
                 ],
               ),
