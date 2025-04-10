@@ -16,34 +16,81 @@ import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 
 late List<CameraDescription> _cameras;
 
-// Configurações do modelo
-const facialModel = 'assets/modelo_convertido.tflite';
-const inputSize = 48;
-const facialLabel = ['Angry', 'Disgust', 'Fear', 'Happy', 'Neutral', 'Sad', 'Surprise'];
+class ModelConfig {
+  final String path;
+  final int inputSize;
+  final bool isColor;
+  final List<String> labels;
+  final Map<String, String> labelTranslations;
 
-const facialLabelTraduzidas = {
-  'Angry': 'Raiva',
-  'Disgust': 'Desgosto',
-  'Fear': 'Medo',
-  'Happy': 'Feliz',
-  'Neutral': 'Neutro',
-  'Sad': 'Triste',
-  'Surprise': 'Surpresa'
+  ModelConfig({
+    required this.path,
+    required this.inputSize,
+    required this.isColor,
+    required this.labels,
+    required this.labelTranslations,
+  });
+}
+
+final Map<String, ModelConfig> modelConfigs = {
+  'Modelo 1': ModelConfig(
+    path: 'assets/modelo_convertido.tflite',
+    inputSize: 48,
+    isColor: false,
+    labels: ['Angry', 'Disgust', 'Fear', 'Happy', 'Neutral', 'Sad', 'Surprise'],
+    labelTranslations: {
+      'Angry': 'Raiva',
+      'Disgust': 'Desgosto',
+      'Fear': 'Medo',
+      'Happy': 'Feliz',
+      'Neutral': 'Neutro',
+      'Sad': 'Triste',
+      'Surprise': 'Surpresa'
+    },
+  ),
+  'Modelo 2': ModelConfig(
+    path: 'assets/model.tflite',
+    inputSize: 224,
+    isColor: true,
+    labels: ['Angry', 'Fear', 'Happy', 'Neutral', 'Sad', 'Surprised'],
+    labelTranslations: {
+      'Angry': 'Raiva',
+      'Fear': 'Medo',
+      'Happy': 'Feliz',
+      'Neutral': 'Neutro',
+      'Sad': 'Triste',
+      'Surprised': 'Surpresa'
+    },
+  ),
+  'Modelo 3': ModelConfig(
+    path: 'assets/fe93.tflite',
+    inputSize: 224,
+    isColor: true,
+    labels: ['驚喜', '害怕', '噁心', '開心', '傷心', '生氣', '無'],
+    labelTranslations: {
+      '驚喜': 'Surpresa',
+      '害怕': 'Medo',
+      '噁心': 'Nojo',
+      '開心': 'Feliz',
+      '傷心': 'Triste',
+      '生氣': 'Raiva',
+      '無': 'Neutro'
+    },
+  ),
 };
 
-// Classe para representar a região do rosto detectado
 class FaceRegion {
-  final int x;
-  final int y;
-  final int width;
-  final int height;
+  final Rect rect;
+  final Map<FaceLandmarkType, FaceLandmark>? landmarks;
 
-  FaceRegion(this.x, this.y, this.width, this.height);
+  FaceRegion(this.rect, [this.landmarks]);
 }
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  debugPrint("📷 Obtendo câmeras disponíveis...");
   _cameras = await availableCameras();
+  debugPrint("✅ Câmeras obtidas: ${_cameras.length} encontradas");
   runApp(const MyApp());
 }
 
@@ -52,6 +99,7 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    debugPrint("🖼️ Construindo widget MyApp...");
     return MaterialApp(
       title: 'Detector de Emoções',
       theme: ThemeData(
@@ -79,35 +127,39 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   bool isProcessing = false;
   String detectedEmotion = "Procurando...";
   bool isFrontCamera = true;
+  FaceRegion? currentFaceRegion;
+  String selectedModel = 'Modelo 1';
 
-  // Isolate para detecção de rostos
   ReceivePort? _receivePort;
   Isolate? _isolate;
   SendPort? _sendPort;
   Orientation? _currentOrientation;
   final Completer<void> _isolateReady = Completer<void>();
 
-  // Classificador de emoções
   late Interpreter _interpreter;
   List<int>? _inputShape;
   List<int>? _outputShape;
+  int _inputSize = 48;
+  bool _isColorInput = false;
+
+  bool _saveDebugImages = false;
 
   @override
   void initState() {
     super.initState();
+    debugPrint("🔄 Inicializando estado...");
     WidgetsBinding.instance.addObserver(this);
     _currentOrientation = _calculateCurrentOrientation();
     _initIsolate();
     _loadModel().then((_) => _initializeCamera(1));
-    debugPrint("🔄 Inicializando aplicação...");
   }
 
   Future<void> _loadModel() async {
     try {
-      debugPrint("⬇️ Iniciando carregamento do modelo...");
+      debugPrint("⬇️ Iniciando carregamento do modelo $selectedModel...");
+      final modelConfig = modelConfigs[selectedModel]!;
       final options = InterpreterOptions();
 
-      // Habilitar XNNPACK para melhor performance
       try {
         if (Platform.isAndroid) {
           debugPrint("⚡ Tentando habilitar XNNPACK delegate...");
@@ -119,10 +171,9 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
       }
 
       debugPrint("📦 Carregando modelo TFLite...");
-      _interpreter = await Interpreter.fromAsset(facialModel, options: options);
+      _interpreter = await Interpreter.fromAsset(modelConfig.path, options: options);
       debugPrint("✅ Modelo carregado com sucesso");
 
-      // Obter shapes de entrada e saída
       debugPrint("📊 Obtendo tensores de entrada/saída...");
       final inputTensors = _interpreter.getInputTensors();
       final outputTensors = _interpreter.getOutputTensors();
@@ -141,12 +192,15 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
         debugPrint("⚠️ Nenhum tensor de saída encontrado");
       }
 
-      // Verificar se o shape de entrada é compatível
+      _inputSize = modelConfig.inputSize;
+      _isColorInput = modelConfig.isColor;
+
       if (_inputShape == null || _inputShape!.length != 4 ||
-          _inputShape![1] != inputSize ||
-          _inputShape![2] != inputSize ||
-          _inputShape![3] != 1) {
-        debugPrint("⚠️ Modelo espera um input de [1, $inputSize, $inputSize, 1] mas recebeu $_inputShape");
+          _inputShape![1] != _inputSize ||
+          _inputShape![2] != _inputSize ||
+          _inputShape![3] != (_isColorInput ? 3 : 1)) {
+        debugPrint(
+            "⚠️ Modelo espera um input de [1, $_inputSize, $_inputSize, ${_isColorInput ? 3 : 1}] mas recebeu $_inputShape");
       } else {
         debugPrint("🆗 Shape de entrada compatível");
       }
@@ -154,6 +208,24 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
       debugPrint("❌ Erro crítico ao carregar modelo: $e");
       rethrow;
     }
+  }
+
+  Future<void> _changeModel(String newModel) async {
+    if (selectedModel == newModel) return;
+
+    debugPrint("🔄 Alterando modelo de $selectedModel para $newModel...");
+    setState(() {
+      selectedModel = newModel;
+      detectedEmotion = "Carregando...";
+    });
+
+    _interpreter.close();
+
+    await _loadModel();
+
+    setState(() {
+      detectedEmotion = "Procurando...";
+    });
   }
 
   Future<void> _toggleCamera() async {
@@ -223,11 +295,17 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
         _isolateReady.complete();
         debugPrint("✅ Isolate de detecção de rostos inicializado com sucesso");
       } else if (message is FaceRegion) {
-        debugPrint("👤 Rosto detectado em ${message.x},${message.y} ${message.width}x${message.height}");
-        setState(() => faceDetected = true);
+        debugPrint("👤 Rosto detectado no frame - Posição: ${message.rect}");
+        setState(() {
+          faceDetected = true;
+          currentFaceRegion = message;
+        });
       } else if (message == null) {
         debugPrint("❌ Nenhum rosto detectado");
-        setState(() => faceDetected = false);
+        setState(() {
+          faceDetected = false;
+          currentFaceRegion = null;
+        });
       }
     });
   }
@@ -237,10 +315,10 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     BackgroundIsolateBinaryMessenger.ensureInitialized(params.rootIsolateToken);
     final faceDetector = FaceDetector(
       options: FaceDetectorOptions(
-        enableContours: true,
-        enableLandmarks: true,
+        enableContours: false,
+        enableLandmarks: false,
         enableClassification: false,
-        performanceMode: FaceDetectorMode.accurate,
+        performanceMode: FaceDetectorMode.fast,
         enableTracking: true,
         minFaceSize: 0.3,
       ),
@@ -273,28 +351,26 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
           final faces = await faceDetector.processImage(inputImage);
 
           if (faces.isNotEmpty) {
-            // Pegar o primeiro rosto (mais proeminente)
+            debugPrint("✅ ${faces.length} rosto(s) detectado(s)");
             final face = faces.first;
             final rect = face.boundingBox;
 
-            // Ajustar coordenadas para garantir que estão dentro dos limites
-            final left = rect.left.clamp(0, width.toDouble());
-            final top = rect.top.clamp(0, height.toDouble());
-            final right = rect.right.clamp(0, width.toDouble());
-            final bottom = rect.bottom.clamp(0, height.toDouble());
+            Map<FaceLandmarkType, FaceLandmark>? landmarksMap;
+            if (face.landmarks != null && face.landmarks!.isNotEmpty) {
+              landmarksMap = {};
+              for (final entry in face.landmarks!.entries) {
+                if (entry.value != null) {
+                  landmarksMap[entry.key] = entry.value!;
+                }
+              }
+            }
 
-            // Criar região do rosto
-            final faceRegion = FaceRegion(
-              left.toInt(),
-              top.toInt(),
-              (right - left).toInt(),
-              (bottom - top).toInt(),
-            );
-
-            debugPrint("✅ Rosto detectado em $left,$top ${faceRegion.width}x${faceRegion.height}");
-            replyPort.send(faceRegion);
+            replyPort.send(FaceRegion(
+              rect,
+              landmarksMap?.isNotEmpty == true ? landmarksMap : null,
+            ));
           } else {
-            debugPrint("❌ Nenhum rosto encontrado");
+            debugPrint("❌ Nenhum rosto encontrado na imagem");
             replyPort.send(null);
           }
         } catch (e) {
@@ -303,6 +379,16 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
         }
       }
     });
+  }
+
+  static InputImageRotation _getRotationFromCamera(Orientation orientation) {
+    final rotation = orientation == Orientation.portrait
+        ? Platform.isAndroid
+        ? InputImageRotation.rotation270deg
+        : InputImageRotation.rotation180deg
+        : InputImageRotation.rotation0deg;
+    debugPrint("🔄 Rotação da câmera: $rotation");
+    return rotation;
   }
 
   Uint8List _yuv420ToNv21(CameraImage image) {
@@ -327,74 +413,17 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     return nv21;
   }
 
-  Float32List _yuvToModelInput(CameraImage image, FaceRegion faceRegion) {
-    final inputBuffer = Float32List(1 * inputSize * inputSize * 1);
-    final yPlane = image.planes[0].bytes;
-    final uPlane = image.planes[1].bytes;
-    final vPlane = image.planes[2].bytes;
-    final yRowStride = image.planes[0].bytesPerRow;
-    final uvRowStride = image.planes[1].bytesPerRow;
-    final uvPixelStride = image.planes[1].bytesPerPixel;
-
-    // Criar uma imagem temporária para o rosto recortado
-    final debugImage = img.Image(width: inputSize, height: inputSize);
-
-    // Fatores de escala para redimensionar o rosto para inputSize
-    final scaleX = faceRegion.width / inputSize;
-    final scaleY = faceRegion.height / inputSize;
-
-    // Determinar se precisa rotacionar (para portrait)
-    final bool needsRotation = _currentOrientation == Orientation.portrait;
-    final bool isFrontCameraRotated = isFrontCamera && needsRotation;
-
-    int pixelIndex = 0;
-    for (int y = 0; y < inputSize; y++) {
-      for (int x = 0; x < inputSize; x++) {
-        // Calcular coordenadas na região do rosto
-        int faceX = (x * scaleX).toInt();
-        int faceY = (y * scaleY).toInt();
-
-        // Coordenadas na imagem original
-        int origX = faceRegion.x + faceX;
-        int origY = faceRegion.y + faceY;
-
-        // Aplicar rotação de 90 graus no sentido horário se necessário
-        if (needsRotation) {
-          final temp = origX;
-          origX = origY;
-          origY = image.height - 1 - temp;
-        }
-
-        // Espelhar horizontalmente se for câmera frontal (após a rotação)
-        if (isFrontCameraRotated) {
-          origX = image.width - 1 - origX;
-        }
-
-        // Garantir que as coordenadas estão dentro dos limites
-        origX = origX.clamp(0, image.width - 1);
-        origY = origY.clamp(0, image.height - 1);
-
-        // Obter valor Y (luminância)
-        final pixelValue = yPlane[origY * yRowStride + origX];
-
-        // Normalizar para [0,1]
-        inputBuffer[pixelIndex++] = pixelValue / 255.0;
-
-        // Debug: Armazenar na imagem visualizável
-        debugImage.setPixelRgb(x, y, pixelValue, pixelValue, pixelValue);
-      }
-    }
-
-    _saveDebugImage(debugImage);
-    return inputBuffer;
-  }
-
   void _saveDebugImage(img.Image image) async {
     try {
+      debugPrint("💾 Tentando salvar imagem de debug...");
       final directory = Platform.isAndroid
-          ? Directory('/storage/emulated/0/Download') // Android
-          : await getApplicationDocumentsDirectory(); // iOS
-      final file = File('${directory.path}/debug_emotion_input.png');
+          ? Directory('/storage/emulated/0/Download')
+          : await getApplicationDocumentsDirectory();
+
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final modelName = selectedModel.replaceAll(' ', '_').toLowerCase();
+      final file = File('${directory.path}/debug_${modelName}_$timestamp.png');
+
       await file.writeAsBytes(img.encodePng(image));
       debugPrint('🖼️ Imagem salva em: ${file.path}');
     } catch (e) {
@@ -402,19 +431,91 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     }
   }
 
-  static InputImageRotation _getRotationFromCamera(Orientation orientation) {
-    final rotation = orientation == Orientation.portrait
-        ? Platform.isAndroid
-        ? InputImageRotation.rotation270deg
-        : InputImageRotation.rotation180deg
-        : InputImageRotation.rotation0deg;
-    debugPrint("🔄 Rotação da câmera: $rotation");
-    return rotation;
+  Float32List _yuvToModelInput(CameraImage image, FaceRegion faceRegion) {
+    debugPrint("🔄 Preparando input para o modelo $selectedModel...");
+    final modelConfig = modelConfigs[selectedModel]!;
+    final channels = modelConfig.isColor ? 3 : 1;
+    final inputBuffer = Float32List(1 * _inputSize * _inputSize * channels);
+
+    final yPlane = image.planes[0].bytes;
+    final yRowStride = image.planes[0].bytesPerRow;
+    final uvPlane = image.planes[1].bytes;
+    final uvRowStride = image.planes[1].bytesPerRow;
+    final uvPixelStride = image.planes[1].bytesPerPixel!;
+
+    final debugImage = img.Image(width: _inputSize, height: _inputSize);
+
+    final scaleX = faceRegion.rect.width / _inputSize;
+    final scaleY = faceRegion.rect.height / _inputSize;
+
+    final bool needsRotation = _currentOrientation == Orientation.portrait;
+    final bool isFrontCameraRotated = isFrontCamera && needsRotation;
+
+    int pixelIndex = 0;
+    for (int y = 0; y < _inputSize; y++) {
+      for (int x = 0; x < _inputSize; x++) {
+        int faceX = (x * scaleX).toInt();
+        int faceY = (y * scaleY).toInt();
+
+        int origX = faceRegion.rect.left.toInt() + faceX;
+        int origY = faceRegion.rect.top.toInt() + faceY;
+
+        if (needsRotation) {
+          final temp = origX;
+          origX = origY;
+          origY = image.height - 1 - temp;
+        }
+
+        if (isFrontCameraRotated) {
+          origX = image.width - 1 - origX;
+        }
+
+        origX = origX.clamp(0, image.width - 1);
+        origY = origY.clamp(0, image.height - 1);
+
+        final yValue = yPlane[origY * yRowStride + origX] / 255.0;
+
+        if (modelConfig.isColor) {
+          final uvX = (origX / 2).floor();
+          final uvY = (origY / 2).floor();
+          final uvIndex = uvY * uvRowStride + uvX * uvPixelStride;
+
+          final uValue = uvPlane[uvIndex] / 255.0;
+          final vValue = uvPlane[uvIndex + 1] / 255.0;
+
+          final r = (yValue + 1.402 * (vValue - 0.5)).clamp(0.0, 1.0);
+          final g = (yValue - 0.344136 * (uValue - 0.5) - 0.714136 * (vValue - 0.5)).clamp(0.0, 1.0);
+          final b = (yValue + 1.772 * (uValue - 0.5)).clamp(0.0, 1.0);
+
+          inputBuffer[pixelIndex++] = r;
+          inputBuffer[pixelIndex++] = g;
+          inputBuffer[pixelIndex++] = b;
+
+          debugImage.setPixelRgb(x, y,
+              (r * 255).toInt(),
+              (g * 255).toInt(),
+              (b * 255).toInt());
+        } else {
+          inputBuffer[pixelIndex++] = yValue;
+          debugImage.setPixelRgb(x, y,
+              (yValue * 255).toInt(),
+              (yValue * 255).toInt(),
+              (yValue * 255).toInt());
+        }
+      }
+    }
+
+    if (_saveDebugImages) {
+      _saveDebugImage(debugImage);
+    }
+
+    debugPrint("✅ Input do modelo preparado");
+    return inputBuffer;
   }
 
   void _processCameraImage(CameraImage image) async {
     final now = DateTime.now();
-    if (lastProcessedTime != null && now.difference(lastProcessedTime!).inMilliseconds < 500) {
+    if (lastProcessedTime != null && now.difference(lastProcessedTime!).inMilliseconds < 200) {
       debugPrint("⏭️ Pulando frame - processamento muito rápido");
       return;
     }
@@ -449,21 +550,21 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
 
       replyPort.listen((message) async {
         if (message is FaceRegion) {
-          debugPrint("👤 Rosto detectado no frame em ${message.x},${message.y} ${message.width}x${message.height}");
-          setState(() => faceDetected = true);
+          debugPrint("👤 Rosto detectado no frame em ${message.rect}");
+          setState(() {
+            faceDetected = true;
+            currentFaceRegion = message;
+          });
 
           debugPrint("🧠 Preparando para análise de emoções...");
-          // Conversão YUV para input do modelo com recorte do rosto
           final input = _yuvToModelInput(image, message);
 
-          // Verificar se temos os shapes necessários
           if (_inputShape == null || _outputShape == null) {
             debugPrint("⚠️ Shapes de input/output não disponíveis");
             setState(() => detectedEmotion = "Erro no modelo");
             return;
           }
 
-          // Preparar buffer de saída
           final outputSize = _outputShape!.reduce((a, b) => a * b);
           final output = List.filled(outputSize, 0.0).reshape(_outputShape!);
 
@@ -473,7 +574,16 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
 
             debugPrint("📊 Saídas do modelo: ${output[0]}");
 
-            // Encontrar emoção com maior confiança
+            final modelConfig = modelConfigs[selectedModel]!;
+            final labels = modelConfig.labels;
+            final labelTranslations = modelConfig.labelTranslations;
+
+            if (output[0].length != labels.length) {
+              debugPrint("❌ Número de saídas (${output[0].length}) não corresponde ao número de labels (${labels.length})");
+              setState(() => detectedEmotion = "Erro: modelo/labels incompatíveis");
+              return;
+            }
+
             int maxIndex = 0;
             double maxConfidence = output[0][0];
             for (int i = 1; i < output[0].length; i++) {
@@ -483,8 +593,8 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
               }
             }
 
-            String emotion = facialLabel[maxIndex];
-            String emotionTranslated = facialLabelTraduzidas[emotion] ?? 'Desconhecido';
+            String emotion = labels[maxIndex];
+            String emotionTranslated = labelTranslations[emotion] ?? 'Desconhecido';
             String confidence = (maxConfidence * 100).toStringAsFixed(1);
 
             debugPrint("🎭 Emoção detectada: $emotionTranslated ($confidence%)");
@@ -498,6 +608,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
           setState(() {
             faceDetected = false;
             detectedEmotion = "Procurando...";
+            currentFaceRegion = null;
           });
         }
         replyPort.close();
@@ -524,45 +635,185 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    debugPrint("🖌️ Reconstruindo interface...");
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.title),
+        actions: [
+          PopupMenuButton<String>(
+            onSelected: _changeModel,
+            itemBuilder: (BuildContext context) {
+              return modelConfigs.keys.map((String model) {
+                return PopupMenuItem<String>(
+                  value: model,
+                  child: Text(model),
+                );
+              }).toList();
+            },
+            icon: const Icon(Icons.model_training),
+          ),
+        ],
       ),
       body: Stack(
         children: [
           if (controller != null && controller!.value.isInitialized)
             CameraPreview(controller!),
-          _buildDetectionIndicator(),
+          if (currentFaceRegion != null) _buildFaceOverlay(),
         ],
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _toggleCamera,
-        tooltip: 'Alternar câmera',
-        child: const Icon(Icons.switch_camera),
+      floatingActionButton: Column(
+        mainAxisAlignment: MainAxisAlignment.end,
+        children: [
+          FloatingActionButton(
+            onPressed: _toggleCamera,
+            tooltip: 'Alternar câmera',
+            child: const Icon(Icons.switch_camera),
+          ),
+          SizedBox(height: 16),
+          FloatingActionButton(
+            onPressed: () {
+              setState(() {
+                _saveDebugImages = !_saveDebugImages;
+                debugPrint(_saveDebugImages
+                    ? "🖼️ Salvamento de imagens ativado"
+                    : "🖼️ Salvamento de imagens desativado");
+              });
+            },
+            tooltip: 'Debug de imagens',
+            child: Icon(_saveDebugImages
+                ? Icons.image
+                : Icons.image_not_supported),
+            heroTag: 'debugImages',
+          ),
+        ],
       ),
     );
   }
 
-  Widget _buildDetectionIndicator() {
+  Widget _buildFaceOverlay() {
+    if (currentFaceRegion == null || controller == null) return Container();
+
+    final mediaQuery = MediaQuery.of(context);
+    final screenSize = mediaQuery.size;
+    final previewSize = controller!.value.previewSize!;
+    final isPortrait = _currentOrientation == Orientation.portrait;
+
+    final faceRect = currentFaceRegion!.rect;
+
+    final double scaleX, scaleY;
+
+    if (isPortrait) {
+      scaleX = screenSize.width / previewSize.height;
+      scaleY = screenSize.height / previewSize.width;
+    } else {
+      scaleX = screenSize.width / previewSize.width;
+      scaleY = screenSize.height / previewSize.height;
+    }
+
+    double left = faceRect.left * scaleX;
+    double top = faceRect.top * scaleY;
+    double right = faceRect.right * scaleX;
+    double bottom = faceRect.bottom * scaleY;
+
+    if (isFrontCamera) {
+      final tempLeft = left;
+      left = screenSize.width - right;
+      right = screenSize.width - tempLeft;
+    }
+
+    final shrinkFactor = 0.85;
+    final centerX = (left + right) / 2;
+    final centerY = (top + bottom) / 2;
+    final newWidth = (right - left) * shrinkFactor;
+    final newHeight = (bottom - top) * shrinkFactor;
+
+    left = centerX - newWidth / 2;
+    right = centerX + newWidth / 2;
+    top = centerY - newHeight / 2;
+    bottom = centerY + newHeight / 2;
+
+    final faceHeight = bottom - top;
+    final verticalAdjustment = math.min(faceHeight * 0.15, screenSize.height * 0.05);
+    top -= verticalAdjustment;
+    bottom -= verticalAdjustment;
+
+    left = left.clamp(0.0, screenSize.width - 10);
+    right = right.clamp(10.0, screenSize.width);
+    top = top.clamp(0.0, screenSize.height - 10);
+    bottom = bottom.clamp(10.0, screenSize.height);
+
+    const margin = 8.0;
+    final fontSize = math.max(14.0, (bottom - top) * 0.1);
+
     return Positioned(
-      bottom: 50,
-      left: 0,
-      right: 0,
-      child: Center(
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: faceDetected ? Colors.green : Colors.red,
-            borderRadius: BorderRadius.circular(8),
+      left: left,
+      top: top,
+      width: right - left,
+      height: bottom - top,
+      child: Container(
+        decoration: BoxDecoration(
+          border: Border.all(
+            color: Colors.green.withOpacity(0.8),
+            width: 2.5,
           ),
-          child: Text(
-            faceDetected ? "Emoção: $detectedEmotion" : "Procurando rosto...",
-            style: const TextStyle(color: Colors.white, fontSize: 18),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Center(
+          child: Padding(
+            padding: EdgeInsets.all(margin),
+            child: Text(
+              detectedEmotion,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.green,
+                fontSize: fontSize,
+                fontWeight: FontWeight.bold,
+                shadows: [
+                  Shadow(
+                    color: Colors.black.withOpacity(0.7),
+                    blurRadius: 3,
+                    offset: Offset(1, 1),
+                  ),
+                ],
+              ),
+            ),
           ),
         ),
       ),
     );
+  }
+}
+
+class FacePainter extends CustomPainter {
+  final Rect faceRect;
+  final List<Offset>? landmarks;
+
+  FacePainter({required this.faceRect, this.landmarks});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.green
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.0;
+
+    canvas.drawRect(faceRect, paint);
+
+    if (landmarks != null && landmarks!.isNotEmpty) {
+      final landmarkPaint = Paint()
+        ..color = Colors.blue
+        ..style = PaintingStyle.fill;
+
+      for (final landmark in landmarks!) {
+        canvas.drawCircle(landmark, 4.0, landmarkPaint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(FacePainter oldDelegate) {
+    return oldDelegate.faceRect != faceRect ||
+        !listEquals(oldDelegate.landmarks, landmarks);
   }
 }
 
